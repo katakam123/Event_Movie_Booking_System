@@ -1,0 +1,252 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Seat Map</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 25px auto;
+            max-width: 1000px;
+            padding: 0 16px;
+            background: #f7f8fa;
+            color: #222;
+        }
+
+        .controls, .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin: 16px 0;
+            align-items: center;
+        }
+
+        input {
+            padding: 10px;
+            min-width: 220px;
+        }
+
+        button {
+            padding: 10px 16px;
+            cursor: pointer;
+        }
+
+        #connection {
+            font-weight: bold;
+            margin: 12px 0;
+        }
+
+        .screen {
+            margin: 24px 0;
+            padding: 12px;
+            text-align: center;
+            background: #ddd;
+            border-radius: 8px;
+        }
+
+        .row {
+            display: flex;
+            gap: 7px;
+            align-items: center;
+            margin: 8px 0;
+            flex-wrap: wrap;
+        }
+
+        .row-name {
+            width: 24px;
+            font-weight: bold;
+        }
+
+        .seat {
+            min-width: 42px;
+            min-height: 40px;
+            border: 0;
+            border-radius: 6px;
+            color: #111;
+            font-size: 12px;
+        }
+
+        .Available { background: #b7e4c7; }
+        .Locked { background: #ffd166; }
+        .Yours { background: #74c0fc; }
+        .Booked { background: #ff8787; }
+        .Unavailable { background: #adb5bd; }
+
+        #events {
+            margin-top: 20px;
+            padding: 12px;
+            background: white;
+            border: 1px solid #ddd;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .legend span {
+            padding: 7px 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Live Seat Map</h1>
+    <p>Connect using a valid access token from your login API.</p>
+
+    <div class="controls">
+        <input id="showId" type="number" min="1" value="1"
+               placeholder="Show ID">
+        <input id="token" type="password"
+               placeholder="Paste access token">
+        <button id="connectBtn" onclick="connect()">Connect</button>
+        <button onclick="disconnect()">Disconnect</button>
+    </div>
+
+    <div id="connection">Disconnected</div>
+
+    <div class="legend">
+        <span class="Available">Available</span>
+        <span class="Locked">Locked</span>
+        <span class="Yours">Yours</span>
+        <span class="Booked">Booked</span>
+        <span class="Unavailable">Unavailable</span>
+    </div>
+
+    <div class="screen">SCREEN</div>
+    <div id="seatMap">Connect to load seats.</div>
+
+    <h2>Live updates</h2>
+    <div id="events"></div>
+
+    <script>
+        let socket = null;
+        const seatMap = document.getElementById("seatMap");
+        const connection = document.getElementById("connection");
+        const events = document.getElementById("events");
+
+        function logEvent(message) {
+            const item = document.createElement("p");
+            item.textContent = new Date().toLocaleTimeString() + " — " + message;
+            events.prepend(item);
+        }
+
+        function drawSeats(seats) {
+            seatMap.replaceChildren();
+
+            const rows = {};
+
+            seats.forEach(seat => {
+                if (!rows[seat.row_label]) {
+                    rows[seat.row_label] = [];
+                }
+                rows[seat.row_label].push(seat);
+            });
+
+            Object.keys(rows).sort().forEach(rowLabel => {
+                const row = document.createElement("div");
+                row.className = "row";
+
+                const label = document.createElement("span");
+                label.className = "row-name";
+                label.textContent = rowLabel;
+                row.appendChild(label);
+
+                rows[rowLabel]
+                    .sort((a, b) => a.seat_number - b.seat_number)
+                    .forEach(seat => {
+                        const button = document.createElement("button");
+                        button.className = "seat " + seat.status;
+                        button.textContent = rowLabel + seat.seat_number;
+                        button.title =
+                            seat.status + " | " + seat.category +
+                            (seat.price != null ? " | ₹" + seat.price : "");
+                        button.disabled = true;
+                        row.appendChild(button);
+                    });
+
+                seatMap.appendChild(row);
+            });
+        }
+
+        function connect() {
+            disconnect();
+
+            const showId = document.getElementById("showId").value.trim();
+            const token = document.getElementById("token").value.trim();
+
+            if (!showId || !token) {
+                alert("Enter a show ID and access token.");
+                return;
+            }
+
+            const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+            const url = protocol + "//" + location.host +
+                "/ws/shows/" + encodeURIComponent(showId) +
+                "/seats?token=" + encodeURIComponent(token);
+
+            socket = new WebSocket(url);
+
+            socket.onopen = () => {
+                connection.textContent = "Connected";
+                logEvent("Connected to show " + showId);
+            };
+
+            socket.onmessage = event => {
+                const data = JSON.parse(event.data);
+
+                if (data.type === "seat_map") {
+                    drawSeats(data.seats);
+                    logEvent("Initial seat map received");
+                } else if (data.type === "seat_update" && data.seat) {
+                    // Replace the changed seat in the current displayed map.
+                    const buttons = seatMap.querySelectorAll(".seat");
+                    const changed = data.seat;
+                    let found = false;
+
+                    buttons.forEach(button => {
+                        if (button.textContent ===
+                            changed.row_label + changed.seat_number) {
+                            button.className = "seat " + changed.status;
+                            button.title = changed.status +
+                                " | " + changed.category +
+                                (changed.price != null
+                                    ? " | ₹" + changed.price : "");
+                            found = true;
+                        }
+                    });
+
+                    if (!found) {
+                        logEvent("Seat update received; refreshing map");
+                        // Reconnect only if a seat is newly added/removed.
+                        // The next connection will receive a fresh full map.
+                    }
+
+                    logEvent(data.message || "Seat updated");
+                } else if (data.type === "error") {
+                    logEvent(data.message);
+                }
+            };
+
+            socket.onerror = () => {
+                connection.textContent = "WebSocket error";
+                logEvent("Connection error; check server and token.");
+            };
+
+            socket.onclose = event => {
+                connection.textContent =
+                    "Disconnected (code " + event.code + ")";
+                logEvent("Connection closed: " + event.reason);
+            };
+        }
+
+        function disconnect() {
+            if (socket) {
+                socket.onclose = null;
+                socket.close();
+                socket = null;
+            }
+            connection.textContent = "Disconnected";
+        }
+    </script>
+</body>
+</html>
